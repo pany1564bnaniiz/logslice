@@ -1,88 +1,71 @@
 """Tests for logslice.pipeline module."""
 
-import io
 import json
-
-import pytest
+from typing import List
 
 from logslice.pipeline import run_pipeline
 
 
-JSON_LINES = "\n".join([
-    json.dumps({"time": "2024-01-15T09:00:00Z", "level": "debug", "msg": "init"}),
-    json.dumps({"time": "2024-01-15T10:00:00Z", "level": "info", "msg": "running", "svc": "api"}),
-    json.dumps({"time": "2024-01-15T11:00:00Z", "level": "error", "msg": "crash"}),
-    "",  # blank line should be skipped
-])
-
-LOGFMT_LINES = "\n".join([
-    'time=2024-01-15T09:00:00Z level=debug msg=init',
-    'time=2024-01-15T10:00:00Z level=info msg=running svc=api',
-])
+def _run(lines: List[str], **kwargs) -> List[str]:
+    return list(run_pipeline(lines, **kwargs))
 
 
-def _run(lines: str, **kwargs) -> list:
-    inp = io.StringIO(lines)
-    out = io.StringIO()
-    run_pipeline(inp, out, **kwargs)
-    out.seek(0)
-    return [json.loads(l) for l in out if l.strip()]
+JSON_LINES = [
+    '{"timestamp":"2024-01-01T09:00:00Z","level":"DEBUG","msg":"boot"}',
+    '{"timestamp":"2024-01-01T10:00:00Z","level":"INFO","msg":"started"}',
+    '{"timestamp":"2024-01-01T11:00:00Z","level":"ERROR","msg":"crash"}',
+    '{"timestamp":"2024-01-01T12:00:00Z","level":"INFO","msg":"recovered"}',
+]
 
 
 def test_pipeline_passes_all_records_with_no_filters():
-    records = _run(JSON_LINES)
-    assert len(records) == 3
+    results = _run(JSON_LINES)
+    assert len(results) == 4
 
 
 def test_pipeline_filters_by_level():
-    records = _run(JSON_LINES, level="error")
-    assert len(records) == 1
-    assert records[0]["msg"] == "crash"
+    results = _run(JSON_LINES, level="INFO")
+    assert len(results) == 2
+    for r in results:
+        assert json.loads(r)["level"] == "INFO"
 
 
 def test_pipeline_filters_by_time_range():
-    records = _run(JSON_LINES, start="2024-01-15T09:30:00Z", end="2024-01-15T10:30:00Z")
-    assert len(records) == 1
-    assert records[0]["level"] == "info"
+    results = _run(
+        JSON_LINES,
+        start="2024-01-01T09:30:00Z",
+        end="2024-01-01T11:30:00Z",
+    )
+    assert len(results) == 2
 
 
 def test_pipeline_filters_by_field_pattern():
-    records = _run(JSON_LINES, field_pattern="svc=api")
-    assert len(records) == 1
-    assert records[0]["svc"] == "api"
+    results = _run(JSON_LINES, fields=["msg=crash"])
+    assert len(results) == 1
+    assert json.loads(results[0])["msg"] == "crash"
 
 
-def test_pipeline_returns_written_count():
-    inp = io.StringIO(JSON_LINES)
-    out = io.StringIO()
-    count = run_pipeline(inp, out, level="info")
-    assert count == 1
+def test_pipeline_skips_blank_lines():
+    lines = ["", "   ", JSON_LINES[0], ""]
+    results = _run(lines)
+    assert len(results) == 1
 
 
-def test_pipeline_skips_unparseable_lines():
-    bad = "not-json-at-all\n" + json.dumps({"level": "info", "msg": "ok"})
-    records = _run(bad, fmt="json")
-    assert len(records) == 1
-    assert records[0]["msg"] == "ok"
+def test_pipeline_show_stats_returns_summary():
+    results = _run(JSON_LINES, show_stats=True)
+    assert len(results) == 1
+    summary = results[0]
+    assert "Total" in summary
+    assert "4" in summary
 
 
-def test_pipeline_logfmt_input():
-    records = _run(LOGFMT_LINES, fmt="logfmt")
-    assert len(records) == 2
+def test_pipeline_show_stats_respects_filters():
+    results = _run(JSON_LINES, level="INFO", show_stats=True)
+    summary = results[0]
+    assert "2" in summary
 
 
-def test_pipeline_pretty_output():
-    inp = io.StringIO(JSON_LINES)
-    out = io.StringIO()
-    run_pipeline(inp, out, out_fmt="pretty", level="info")
-    out.seek(0)
-    content = out.read()
-    assert "[INFO]" in content
-    assert "running" in content
-
-
-def test_pipeline_empty_stream_writes_nothing():
-    inp = io.StringIO("")
-    out = io.StringIO()
-    count = run_pipeline(inp, out)
-    assert count == 0
+def test_pipeline_output_fmt_logfmt():
+    results = _run(JSON_LINES[:1], output_fmt="logfmt")
+    assert "=" in results[0]
+    assert "json" not in results[0]

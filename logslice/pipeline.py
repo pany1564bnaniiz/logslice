@@ -1,54 +1,61 @@
-"""Orchestrates parsing, filtering, and formatting of log lines."""
+"""Pipeline: read, filter, and emit log records."""
 
-from typing import IO, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from logslice.filters import filter_by_field_pattern, filter_by_level, filter_by_time
 from logslice.formatter import format_record
-from logslice.parser import LogParseError, detect_format, parse_json_line, parse_logfmt_line
+from logslice.parser import detect_format, parse_json_line, parse_logfmt_line
+from logslice.stats import compute_stats, format_stats
 
 
-def _iter_records(stream: IO[str], fmt: Optional[str] = None) -> Iterator[dict]:
-    """Yield parsed records from a line-oriented log stream."""
-    detected: Optional[str] = fmt
-    for raw_line in stream:
-        line = raw_line.rstrip("\n")
+def _iter_records(
+    lines: Iterable[str],
+    fmt: Optional[str] = None,
+) -> Iterator[Dict[str, Any]]:
+    """Parse lines into record dicts, auto-detecting format when fmt is None."""
+    for line in lines:
+        line = line.rstrip("\n")
         if not line.strip():
             continue
-        if detected is None:
-            detected = detect_format(line)
-        try:
-            if detected == "json":
-                yield parse_json_line(line)
-            else:
-                yield parse_logfmt_line(line)
-        except LogParseError:
-            continue
+        resolved = fmt or detect_format(line)
+        if resolved == "json":
+            yield parse_json_line(line)
+        else:
+            yield parse_logfmt_line(line)
 
 
 def run_pipeline(
-    stream: IO[str],
-    output: IO[str],
+    lines: Iterable[str],
     *,
     fmt: Optional[str] = None,
-    out_fmt: str = "json",
+    output_fmt: str = "json",
+    level: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
-    level: Optional[str] = None,
-    field_pattern: Optional[str] = None,
-) -> int:
-    """Filter and format log records from *stream* into *output*.
+    fields: Optional[List[str]] = None,
+    show_stats: bool = False,
+) -> Iterator[str]:
+    """Run the full filter pipeline, yielding formatted output lines.
 
-    Returns the number of records written.
+    When show_stats=True, yields a stats summary block instead of records.
     """
-    written = 0
-    for record in _iter_records(stream, fmt=fmt):
+    records = list(_iter_records(lines, fmt=fmt))
+
+    filtered = []
+    for record in records:
         if not filter_by_time(record, start=start, end=end):
             continue
-        if level and not filter_by_level(record, level=level):
+        if level and not filter_by_level(record, level):
             continue
-        if field_pattern and not filter_by_field_pattern(record, pattern=field_pattern):
-            continue
-        output.write(format_record(record, fmt=out_fmt))
-        output.write("\n")
-        written += 1
-    return written
+        if fields:
+            if not all(filter_by_field_pattern(record, f) for f in fields):
+                continue
+        filtered.append(record)
+
+    if show_stats:
+        stats = compute_stats(filtered)
+        yield format_stats(stats)
+        return
+
+    for record in filtered:
+        yield format_record(record, output_fmt)
